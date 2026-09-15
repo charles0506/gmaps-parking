@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.1
+// @version      2.2
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -48,14 +48,31 @@
 
   // 載入時預設開路況：URL 補 data 參數後 replace 一次。
   // sessionStorage 記已做過，之後使用者自己關路況不會被強制開回來。
-  function enableTraffic() {
+  // 注意：裸 /maps（還沒有 @lat,lng,zoom）掛 data= 會變 /maps/data=… 直接 404，
+  // 所以沒座標時先不做也不標記，等 Maps 把座標寫進網址後由 mutation 迴圈再試。
+  let trafficDone = false;
+  function markTrafficDone() {
+    trafficDone = true;
     try {
-      if (sessionStorage.getItem("gmp-traffic-done")) return;
       sessionStorage.setItem("gmp-traffic-done", "1");
     } catch (e) {
-      /* 隱私模式等情況拿不到 storage，就只做這一次 */
+      /* 隱私模式等情況拿不到 storage，就靠 trafficDone 撐這一頁 */
     }
-    if (location.href.includes(TRAFFIC_DATA)) return;
+  }
+  function enableTraffic() {
+    if (trafficDone) return;
+    try {
+      if (sessionStorage.getItem("gmp-traffic-done")) {
+        trafficDone = true;
+        return;
+      }
+    } catch (e) {}
+    if (location.href.includes(TRAFFIC_DATA)) {
+      markTrafficDone();
+      return;
+    }
+    if (!/@-?\d+\.\d+,-?\d+\.\d+,/.test(location.pathname)) return; // 還沒座標，下輪再試
+    markTrafficDone();
     const u = new URL(location.href);
     u.pathname = u.pathname.includes("/data=")
       ? u.pathname + TRAFFIC_DATA
@@ -154,6 +171,7 @@
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
+      enableTraffic(); // 裸 /maps 載入時要等座標進網址才補路況參數
       ensure();
     });
   }
