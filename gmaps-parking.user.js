@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.2
-// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層
+// @version      2.3
+// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在台灣
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
@@ -11,7 +11,7 @@
 // @match        https://www.google.com.tw/maps*
 // @grant        none
 // @noframes
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (() => {
@@ -78,6 +78,31 @@
       ? u.pathname + TRAFFIC_DATA
       : u.pathname.replace(/\/$/, "") + "/data=" + TRAFFIC_DATA;
     location.replace(u.toString());
+  }
+
+  // 裸 /maps 開啟（沒指定地點）時固定落在台灣全島視角，不讓 Google 依 IP 亂猜。
+  // 用 navigation entry 看「當初載入的網址」，因為 Maps 很快會把自己猜的座標寫進網址列。
+  const TAIWAN_VIEW = "@23.7,120.96,8z";
+  const HARMLESS_PARAMS = ["authuser", "hl", "entry", "g_ep", "ved", "tab"];
+  function redirectBareToTaiwan() {
+    let initial;
+    try {
+      const nav = performance.getEntriesByType("navigation")[0];
+      initial = new URL(nav && nav.name ? nav.name : location.href);
+    } catch (e) {
+      initial = new URL(location.href);
+    }
+    if (!/^\/maps\/?$/.test(initial.pathname)) return false;
+    // 帶 ?q= / ?ll= 這類參數代表有指定目的地，不干涉
+    for (const key of initial.searchParams.keys()) {
+      if (!HARMLESS_PARAMS.includes(key)) return false;
+    }
+    const u = new URL(location.href);
+    u.pathname = `/maps/${TAIWAN_VIEW}/data=${TRAFFIC_DATA}`;
+    u.search = initial.search;
+    u.hash = "";
+    location.replace(u.toString());
+    return true;
   }
 
   function onChipClick(e) {
@@ -176,10 +201,16 @@
     });
   }
 
-  enableTraffic();
-  ensure();
-  new MutationObserver(onMutate).observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
+  function init() {
+    enableTraffic();
+    ensure();
+    new MutationObserver(onMutate).observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  if (redirectBareToTaiwan()) return;
+  if (document.body) init();
+  else document.addEventListener("DOMContentLoaded", init, { once: true });
 })();
