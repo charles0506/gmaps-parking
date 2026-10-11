@@ -1,15 +1,18 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.3
-// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在台灣
+// @version      2.4
+// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
 // @downloadURL  https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
 // @match        https://www.google.com/maps*
 // @match        https://www.google.com.tw/maps*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
 // @noframes
 // @run-at       document-start
 // ==/UserScript==
@@ -80,9 +83,31 @@
     location.replace(u.toString());
   }
 
-  // 裸 /maps 開啟（沒指定地點）時固定落在台灣全島視角，不讓 Google 依 IP 亂猜。
+  // 裸 /maps 開啟（沒指定地點）時固定落在住家視角，不讓 Google 依 IP 亂猜。
+  // 住家座標只存在本機 userscript 儲存區（選單指令設定），不寫進原始碼；沒設定就用台灣全島。
   // 用 navigation entry 看「當初載入的網址」，因為 Maps 很快會把自己猜的座標寫進網址列。
   const TAIWAN_VIEW = "@23.7,120.96,8z";
+  const HOME_KEY = "home_view";
+  const VIEW_RE = /^@-?\d+\.\d+,-?\d+\.\d+,\d+(\.\d+)?z$/;
+
+  function defaultView() {
+    const saved = GM_getValue(HOME_KEY, "");
+    return VIEW_RE.test(saved) ? saved : TAIWAN_VIEW;
+  }
+
+  GM_registerMenuCommand("📍 將目前視角設為住家", () => {
+    const v = currentView();
+    if (!v) {
+      alert("讀不到目前地圖座標（街景或特殊模式），請切回一般地圖再設定。");
+      return;
+    }
+    GM_setValue(HOME_KEY, `@${v.lat},${v.lng},${v.zoom}z`);
+    alert("已設為住家。之後開 google.com/maps 會直接落在這個視角。");
+  });
+  GM_registerMenuCommand("🗑️ 清除住家（改回台灣全島）", () => {
+    GM_deleteValue(HOME_KEY);
+    alert("已清除住家設定。");
+  });
   const HARMLESS_PARAMS = ["authuser", "hl", "entry", "g_ep", "ved", "tab"];
   function redirectBareToTaiwan() {
     let initial;
@@ -98,7 +123,7 @@
       if (!HARMLESS_PARAMS.includes(key)) return false;
     }
     const u = new URL(location.href);
-    u.pathname = `/maps/${TAIWAN_VIEW}/data=${TRAFFIC_DATA}`;
+    u.pathname = `/maps/${defaultView()}/data=${TRAFFIC_DATA}`;
     u.search = initial.search;
     u.hash = "";
     location.replace(u.toString());
