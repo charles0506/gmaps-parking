@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.9
+// @version      2.10
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角開關一鍵切換「想去的地點」顯示
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -140,7 +140,9 @@
   const STATE_KEY = "list_visibility"; // { 清單名稱: true(顯示)/false(隱藏) }
   // 「私人·1,308 個地點」「Private · 40 places」
   const COUNT_RE = /^(私人|公開|共用|已共用|分享|已分享|Private|Public|Shared)?\s*[·・•]?\s*[\d,]+\s*(個地點|places?)$/i;
-  const SHOW_ITEM_RE = /顯示在你的地圖上|顯示在地圖上|(show|hide).*(on|in) your map/i;
+  // 實際選單文字（2026-11 確認）：顯示中 →「不顯示在你的地圖上」；隱藏中 →「在你的地圖上顯示」
+  // 兩種語序都認，只要含「地圖上」且有「顯示」
+  const SHOW_ITEM_RE = /地圖上.{0,3}顯示|顯示.{0,3}地圖上|(show|hide).*(on|in) your map/i;
   const HIDE_WORD_RE = /不顯示|隱藏|hide|don.?t show/i; // 選單寫「不顯示」= 目前是顯示中
 
   let listState = {};
@@ -183,15 +185,19 @@
 
   // 確實把選單關掉：Esc 不一定關得掉，就再點一次 ⋮，最後點空白處。
   // 沒關乾淨的話，下一個清單會讀到上一個清單殘留的選單（狀態就會錯）。
+  // 任何開著的選單都算（就算認不出裡面的字，也要關掉，不能留在畫面上）
+  const anyMenu = () =>
+    findShowItem() ||
+    [...document.querySelectorAll('[role="menu"]')].find((el) => el.offsetParent !== null);
   async function closeMenuSure(menuBtn) {
-    if (!findShowItem()) return true;
+    if (!anyMenu()) return true;
     closeMenu();
-    if (await waitFor(() => !findShowItem(), 400)) return true;
+    if (await waitFor(() => !anyMenu(), 400)) return true;
     if (menuBtn && menuBtn.isConnected) menuBtn.click();
-    if (await waitFor(() => !findShowItem(), 400)) return true;
+    if (await waitFor(() => !anyMenu(), 400)) return true;
     document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     document.body.click();
-    return !!(await waitFor(() => !findShowItem(), 400));
+    return !!(await waitFor(() => !anyMenu(), 400));
   }
 
   // 開 ⋮ 選單讀狀態，依 mode 處理，回傳處理後是否顯示（失敗回 null）：
