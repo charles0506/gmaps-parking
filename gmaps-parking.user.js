@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.4
-// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）
+// @version      2.5
+// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
@@ -130,6 +130,236 @@
     return true;
   }
 
+
+  // ───────── 已儲存清單：每列加「顯示在地圖上」開關 ─────────
+  // 原生要「⋮ → 不顯示在你的地圖上」點兩下，這裡直接在列上放一顆開關。
+  // 做法：點開關時代點那顆 ⋮、在選單裡找「(不)顯示在你的地圖上」點下去；
+  // 初次看到清單時用「隱形選單」探一次目前狀態，結果存本機，之後直接顯示。
+  const TOGGLE_CLS = "gmp-list-toggle";
+  const PROBING_CLS = "gmp-probing";
+  const STATE_KEY = "list_visibility"; // { 清單名稱: true(顯示)/false(隱藏) }
+  // 「私人·1,308 個地點」「Private · 40 places」
+  const COUNT_RE = /^(私人|公開|共用|已共用|Private|Public|Shared)?\s*[·・•]?\s*[\d,]+\s*(個地點|places?)$/i;
+  const SHOW_ITEM_RE = /顯示在你的地圖上|顯示在地圖上|(show|hide).*(on|in) your map/i;
+  const HIDE_WORD_RE = /不顯示|隱藏|hide|don.?t show/i; // 選單寫「不顯示」= 目前是顯示中
+
+  let listState = {};
+  try {
+    listState = JSON.parse(GM_getValue(STATE_KEY, "{}")) || {};
+  } catch (e) {}
+  const saveState = () => GM_setValue(STATE_KEY, JSON.stringify(listState));
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function waitFor(fn, timeout = 1500) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      const v = fn();
+      if (v) return v;
+      await sleep(50);
+    }
+    return null;
+  }
+  const findShowItem = () =>
+    [...document.querySelectorAll('[role^="menuitem"], [role="option"]')].find(
+      (el) => el.offsetParent !== null && SHOW_ITEM_RE.test(cleanLabel(el.textContent))
+    );
+  function closeMenu() {
+    const ev = { key: "Escape", code: "Escape", keyCode: 27, bubbles: true };
+    (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", ev));
+    document.dispatchEvent(new KeyboardEvent("keydown", ev));
+  }
+
+  // 一次只操作一個選單，排隊執行
+  let queue = Promise.resolve();
+  const enqueue = (job) => (queue = queue.then(job, job));
+
+  // 開 ⋮ 選單讀狀態；doToggle=true 時順便點下去切換。回傳切換後（或目前）是否顯示。
+  function operate(row, doToggle) {
+    return enqueue(async () => {
+      if (!row.menuBtn.isConnected) return null;
+      const silent = !doToggle;
+      if (silent) document.documentElement.classList.add(PROBING_CLS);
+      try {
+        row.menuBtn.click();
+        const item = await waitFor(findShowItem);
+        if (!item) {
+          closeMenu();
+          return null;
+        }
+        const visibleNow = HIDE_WORD_RE.test(cleanLabel(item.textContent));
+        if (!doToggle) {
+          closeMenu();
+          await waitFor(() => !findShowItem(), 800);
+          return visibleNow;
+        }
+        item.click();
+        await waitFor(() => !findShowItem(), 800);
+        return !visibleNow;
+      } finally {
+        if (silent) document.documentElement.classList.remove(PROBING_CLS);
+      }
+    });
+  }
+
+  function paint(btn, visible) {
+    btn.dataset.state = visible == null ? "unknown" : visible ? "on" : "off";
+    btn.title =
+      visible == null ? "點一下切換是否顯示在地圖上"
+      : visible ? "目前顯示在地圖上，點一下隱藏" : "目前未顯示，點一下顯示在地圖上";
+    btn.setAttribute("aria-pressed", visible ? "true" : "false");
+  }
+
+  let toggleStyleDone = false;
+  function injectToggleStyle() {
+    if (toggleStyleDone) return;
+    toggleStyleDone = true;
+    const st = document.createElement("style");
+    st.textContent = `
+      .${TOGGLE_CLS} {
+        flex: none; align-self: center; position: relative; width: 36px; height: 20px;
+        margin: 0 4px; padding: 0; border: none; border-radius: 10px; cursor: pointer;
+        background: #bdc1c6; transition: background .15s; vertical-align: middle;
+      }
+      .${TOGGLE_CLS}::after {
+        content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+        border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3);
+        transition: left .15s;
+      }
+      .${TOGGLE_CLS}[data-state="on"] { background: #1a73e8; }
+      .${TOGGLE_CLS}[data-state="on"]::after { left: 18px; }
+      .${TOGGLE_CLS}[data-state="unknown"] { background: #dadce0; }
+      .${TOGGLE_CLS}[data-busy] { opacity: .5; cursor: progress; }
+      html.${PROBING_CLS} [role="menu"], html.${PROBING_CLS} [role="listbox"] {
+        opacity: 0 !important; pointer-events: none !important;
+      }`;
+    document.head.appendChild(st);
+  }
+
+  // 由「N 個地點」那行往上找：第一個包含「另一顆按鈕」（⋮）的祖先就是整列
+  function findRow(countEl) {
+    let node = countEl;
+    for (let i = 0; i < 7 && node.parentElement; i++) {
+      node = node.parentElement;
+      const btns = [...node.querySelectorAll("button, [role='button']")].filter(
+        (b) => !b.contains(countEl) && !b.classList.contains(TOGGLE_CLS)
+      ); // ⋮ 可能 hover 才出現（display:none），所以不檢查寬度
+      if (btns.length) {
+        // 同一容器若混到別列就放棄（避免一顆開關控到別的清單）
+        const counts = [...node.querySelectorAll("*")].filter(
+          (el) => !el.children.length && COUNT_RE.test(el.textContent.trim())
+        );
+        if (counts.length > 1) return null;
+        return { container: node, menuBtn: btns[btns.length - 1] };
+      }
+    }
+    return null;
+  }
+
+  // 清單名稱：count 那行的前一個有字的葉節點
+  function listName(countEl, container) {
+    const leaves = [...container.querySelectorAll("*")].filter(
+      (el) => !el.children.length && cleanLabel(el.textContent)
+    );
+    const i = leaves.indexOf(countEl);
+    return i > 0 ? cleanLabel(leaves[i - 1].textContent) : "";
+  }
+
+  // 使用者自己用 ⋮ 選單切換時也同步開關狀態
+  let lastMenuRow = null;
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (document.documentElement.classList.contains(PROBING_CLS)) return;
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      for (const row of rows) {
+        if (row.menuBtn.contains(t)) {
+          lastMenuRow = row;
+          return;
+        }
+      }
+      const item = t.closest('[role^="menuitem"], [role="option"]');
+      if (item && lastMenuRow && SHOW_ITEM_RE.test(cleanLabel(item.textContent)) && e.isTrusted) {
+        const v = !HIDE_WORD_RE.test(cleanLabel(item.textContent));
+        const r = lastMenuRow;
+        listState[r.name] = v;
+        saveState();
+        paint(r.btn, v);
+      }
+    },
+    true
+  );
+
+  const rows = new Set();
+  let lastScan = 0;
+  function ensureListToggles() {
+    // Maps DOM 變動極頻繁，掃描節流到 400ms 一次
+    const now = Date.now();
+    if (now - lastScan < 400) {
+      clearTimeout(ensureListToggles.t);
+      ensureListToggles.t = setTimeout(ensureListToggles, 450);
+      return;
+    }
+    lastScan = now;
+    for (const row of rows) if (!row.btn.isConnected) rows.delete(row);
+    const counts = [...document.querySelectorAll("div, span")].filter(
+      (el) => !el.children.length && COUNT_RE.test(el.textContent.trim())
+    );
+    for (const countEl of counts) {
+      const found = findRow(countEl);
+      if (!found || found.container.querySelector("." + TOGGLE_CLS)) continue;
+      injectToggleStyle();
+      const name = listName(countEl, found.container) || countEl.textContent.trim();
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = TOGGLE_CLS;
+      const row = { name, btn, menuBtn: found.menuBtn };
+      rows.add(row);
+      paint(btn, listState[name]);
+      btn.addEventListener(
+        "click",
+        async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (btn.dataset.busy) return;
+          btn.dataset.busy = "1";
+          const v = await operate(row, true);
+          delete btn.dataset.busy;
+          if (v == null) {
+            btn.title = "找不到「顯示在你的地圖上」選項，請改用 ⋮ 選單";
+            return;
+          }
+          listState[name] = v;
+          saveState();
+          paint(btn, v);
+        },
+        true
+      );
+      // 擋掉 mousedown/pointerdown，避免觸發外層「開啟清單」
+      ["mousedown", "pointerdown", "mouseup", "pointerup"].forEach((t) =>
+        btn.addEventListener(t, (e) => e.stopPropagation(), true)
+      );
+      found.menuBtn.parentElement.insertBefore(btn, found.menuBtn);
+      // 沒記錄過的清單，靜默探一次真實狀態
+      if (!(name in listState)) {
+        operate(row, false).then((v) => {
+          if (v == null) return;
+          listState[name] = v;
+          saveState();
+          paint(btn, v);
+        });
+      }
+    }
+  }
+
+  GM_registerMenuCommand("🔄 重新讀取清單顯示狀態", () => {
+    listState = {};
+    saveState();
+    for (const row of rows) row.btn.remove();
+    rows.clear();
+    ensureListToggles();
+  });
+
   function onChipClick(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -223,12 +453,14 @@
       scheduled = false;
       enableTraffic(); // 裸 /maps 載入時要等座標進網址才補路況參數
       ensure();
+      ensureListToggles();
     });
   }
 
   function init() {
     enableTraffic();
     ensure();
+    ensureListToggles();
     new MutationObserver(onMutate).observe(document.body, {
       childList: true,
       subtree: true,
