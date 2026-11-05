@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.7
-// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左側欄加「清單開關」鈕，不用開已儲存就能切換
+// @version      2.8
+// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角「清單開關」一鍵全部顯示／全部隱藏
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
@@ -181,28 +181,51 @@
   let queue = Promise.resolve();
   const enqueue = (job) => (queue = queue.then(job, job));
 
-  // 開 ⋮ 選單讀狀態；doToggle=true 時順便點下去切換。回傳切換後（或目前）是否顯示。
-  function operate(row, doToggle) {
+  // 確實把選單關掉：Esc 不一定關得掉，就再點一次 ⋮，最後點空白處。
+  // 沒關乾淨的話，下一個清單會讀到上一個清單殘留的選單（狀態就會錯）。
+  async function closeMenuSure(menuBtn) {
+    if (!findShowItem()) return true;
+    closeMenu();
+    if (await waitFor(() => !findShowItem(), 400)) return true;
+    if (menuBtn && menuBtn.isConnected) menuBtn.click();
+    if (await waitFor(() => !findShowItem(), 400)) return true;
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    document.body.click();
+    return !!(await waitFor(() => !findShowItem(), 400));
+  }
+
+  // 開 ⋮ 選單讀狀態，依 mode 處理，回傳處理後是否顯示（失敗回 null）：
+  //   "probe" 只讀；"toggle" 反轉；true / false 設成指定狀態（已經是就不動）
+  function operate(row, mode) {
     return enqueue(async () => {
       if (!row.menuBtn.isConnected) return null;
-      const silent = !doToggle;
+      const silent = mode !== "toggle";
       if (silent) document.documentElement.classList.add(PROBING_CLS);
       try {
+        await closeMenuSure(); // 先清掉任何殘留選單
+        const stale = new Set(
+          document.querySelectorAll('[role^="menuitem"], [role="option"]')
+        );
         row.menuBtn.click();
-        const item = await waitFor(findShowItem);
+        // 只認這次新開的選單項目
+        const item = await waitFor(() => {
+          const it = findShowItem();
+          return it && !stale.has(it) ? it : null;
+        });
         if (!item) {
-          closeMenu();
+          await closeMenuSure(row.menuBtn);
           return null;
         }
         const visibleNow = HIDE_WORD_RE.test(cleanLabel(item.textContent));
-        if (!doToggle) {
-          closeMenu();
-          await waitFor(() => !findShowItem(), 800);
+        const want = mode === "probe" ? visibleNow : mode === "toggle" ? !visibleNow : mode;
+        if (want === visibleNow) {
+          await closeMenuSure(row.menuBtn);
           return visibleNow;
         }
         item.click();
         await waitFor(() => !findShowItem(), 800);
-        return !visibleNow;
+        await closeMenuSure(row.menuBtn);
+        return want;
       } finally {
         if (silent) document.documentElement.classList.remove(PROBING_CLS);
       }
@@ -345,7 +368,7 @@
           e.stopPropagation();
           if (btn.dataset.busy) return;
           btn.dataset.busy = "1";
-          const v = await operate(row, true);
+          const v = await operate(row, "toggle");
           delete btn.dataset.busy;
           if (v == null) {
             btn.title = "找不到「顯示在你的地圖上」選項，請改用 ⋮ 選單";
@@ -364,7 +387,7 @@
       found.menuBtn.parentElement.insertBefore(btn, found.menuBtn);
       // 沒記錄過的清單，靜默探一次真實狀態
       if (!(name in listState)) {
-        operate(row, false).then((v) => {
+        operate(row, "probe").then((v) => {
           if (v == null) return;
           listState[name] = v;
           saveState();
@@ -384,12 +407,13 @@
     ensureListToggles(true);
   });
 
-  // ───────── 左側欄「清單開關」：不用打開已儲存就能切換 ─────────
-  // 左側欄本身沒有清單資料，所以切換時腳本會：
-  //   已在畫面上的列 → 直接切；否則自動打開「已儲存 → 清單」→ 切換 → 若是我們打開的就再關掉。
-  // 清單名稱與狀態取自之前在「已儲存」裡看過的紀錄（listState / listOrder）。
+  // ───────── 左下角「清單開關」：一鍵全部顯示／全部隱藏 ─────────
+  // Google 只有「已儲存 → 清單 → ⋮」能切換清單顯示，沒有別的入口，所以腳本會在背後
+  // 打開「已儲存」面板操作，期間把面板和選單都設成透明，做完再收起來。
+  // 方向：目前有任一清單顯示中 → 全部隱藏；全部都隱藏 → 全部顯示。
   const RAIL_ID = "gmp-rail-lists";
-  const POP_ID = "gmp-rail-pop";
+  const TOAST_ID = "gmp-rail-toast";
+  const AUTO_CLS = "gmp-auto";
   const RAIL_SAVED = ["已儲存", "Saved"];
   const RAIL_RECENT = ["最近", "Recents", "Recent"];
   const LISTS_TAB = ["清單", "Lists"];
@@ -417,49 +441,106 @@
     );
   }
 
-  function rowByName(name) {
-    for (const row of rows) if (row.name === name && row.menuBtn.isConnected) return row;
+  // 「已儲存」面板本體：從「清單」分頁往上找，第一個夠寬夠高的容器
+  function findSavedPanel(tab) {
+    let node = tab;
+    while (node && node !== document.body) {
+      const r = node.getBoundingClientRect();
+      if (r.width >= 280 && r.height >= innerHeight * 0.5) return node;
+      node = node.parentElement;
+    }
     return null;
-  }
-
-  // 不開「已儲存」面板時，替使用者跑一遍：開面板 → 清單分頁 → 切換 → 關面板
-  // 回傳 openedByUs，讓呼叫端在全部做完後才關面板（全部顯示/隱藏時只開關一次）
-  function railToggle(name) {
-    return enqueue(async () => {
-      let openedByUs = false;
-      ensureListToggles(true);
-      let row = rowByName(name);
-      if (!row) {
-        let tab = findListsTab();
-        if (!tab) {
-          const saved = findRailItem(RAIL_SAVED);
-          if (!saved) return { err: "找不到左側欄的「已儲存」" };
-          saved.click();
-          openedByUs = true;
-          tab = await waitFor(findListsTab, 4000);
-        }
-        if (!tab) return { err: "打不開「已儲存 → 清單」", openedByUs };
-        if (tab.getAttribute("aria-selected") !== "true") tab.click();
-        row = await waitFor(() => (ensureListToggles(true), rowByName(name)), 4000);
-        if (!row) return { err: `「已儲存」裡找不到清單「${name}」`, openedByUs };
-      }
-      return { row, openedByUs };
-    }).then(async (res) => {
-      // operate 自己會排隊，所以要在上一段 enqueue 結束後才呼叫，避免互等卡死
-      if (!res.row) return { err: res.err, openedByUs: res.openedByUs };
-      const v = await operate(res.row, true);
-      if (v == null) return { err: "找不到「顯示在你的地圖上」選項", openedByUs: res.openedByUs };
-      listState[name] = v;
-      saveState();
-      paint(res.row.btn, v);
-      return { v, openedByUs: res.openedByUs };
-    });
   }
 
   function closeSavedPanel() {
     // 再點一次左側欄「已儲存」會把面板收起來
     const saved = findRailItem(RAIL_SAVED);
     if (saved) saved.click();
+  }
+
+  function anyVisible() {
+    return Object.values(listState).some((v) => v === true);
+  }
+
+  let railBusy = false;
+  async function toggleAll() {
+    if (railBusy) return;
+    railBusy = true;
+    const want = !anyVisible();
+    paintRail(want ? "正在全部顯示…" : "正在全部隱藏…");
+    const html = document.documentElement;
+    html.classList.add(AUTO_CLS, PROBING_CLS);
+    let openedByUs = false;
+    let hidden = null;
+    let msg = "";
+    try {
+      ensureListToggles(true);
+      let tab = findListsTab();
+      if (!tab) {
+        const saved = findRailItem(RAIL_SAVED);
+        if (!saved) throw new Error("找不到左側欄的「已儲存」");
+        saved.click();
+        openedByUs = true;
+        tab = await waitFor(findListsTab, 4000);
+        if (!tab) throw new Error("打不開「已儲存 → 清單」");
+      }
+      // 是我們打開的面板就設透明，使用者看不到
+      if (openedByUs) {
+        hidden = findSavedPanel(tab);
+        if (hidden) hidden.style.setProperty("opacity", "0", "important");
+      }
+      if (tab.getAttribute("aria-selected") !== "true") tab.click();
+      await waitFor(() => {
+        ensureListToggles(true);
+        return [...rows].some((r) => r.menuBtn.isConnected);
+      }, 4000);
+      await sleep(300); // 等清單列都渲染出來
+      ensureListToggles(true);
+      const targets = [...rows].filter((r) => r.menuBtn.isConnected);
+      if (!targets.length) throw new Error("「已儲存」裡找不到任何清單");
+      let ok = 0;
+      for (const row of targets) {
+        const v = await operate(row, want);
+        if (v == null) continue;
+        ok++;
+        listState[row.name] = v;
+        paint(row.btn, v);
+      }
+      saveState();
+      msg =
+        ok === targets.length
+          ? `已全部${want ? "顯示" : "隱藏"}（${ok} 個清單）`
+          : `已${want ? "顯示" : "隱藏"} ${ok}/${targets.length} 個清單，其餘請到「已儲存」手動切換`;
+    } catch (e) {
+      msg = e.message || String(e);
+    } finally {
+      if (openedByUs) {
+        await sleep(150);
+        closeSavedPanel();
+        await sleep(300);
+      }
+      if (hidden) hidden.style.removeProperty("opacity");
+      html.classList.remove(AUTO_CLS, PROBING_CLS);
+      railBusy = false;
+      paintRail();
+      toast(msg);
+    }
+  }
+
+  function toast(text) {
+    if (!text) return;
+    document.getElementById(TOAST_ID)?.remove();
+    const btn = document.getElementById(RAIL_ID);
+    const t = document.createElement("div");
+    t.id = TOAST_ID;
+    t.textContent = text;
+    document.body.appendChild(t);
+    if (btn) {
+      const r = btn.getBoundingClientRect();
+      t.style.left = `${Math.round(r.right + 8)}px`;
+      t.style.bottom = `${Math.round(innerHeight - r.bottom + 12)}px`;
+    }
+    setTimeout(() => t.remove(), 3000);
   }
 
   let railStyleDone = false;
@@ -469,12 +550,6 @@
     injectToggleStyle();
     const st = document.createElement("style");
     st.textContent = `
-      #${POP_ID} {
-        position: fixed; z-index: 10000; min-width: 240px; max-width: 320px; max-height: 70vh;
-        overflow: auto; padding: 8px 0; background: #fff; color: #202124; border-radius: 12px;
-        box-shadow: 0 4px 16px rgba(0,0,0,.25);
-        font: 14px/1.4 Roboto, "Microsoft JhengHei", sans-serif;
-      }
       #${RAIL_ID} {
         position: fixed; bottom: 16px; left: 0; z-index: 9999; width: 72px; padding: 6px 0;
         display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -482,26 +557,13 @@
         font: 500 12px Roboto, "Microsoft JhengHei", sans-serif;
       }
       #${RAIL_ID}:hover { background: rgba(60,64,67,.08); }
-      #${POP_ID} .gmp-pop-title { padding: 6px 16px 8px; font-weight: 500; color: #5f6368; font-size: 13px; }
-      #${POP_ID} .gmp-pop-row {
-        display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 16px; cursor: pointer;
-      }
-      #${POP_ID} .gmp-pop-row:hover { background: #f1f3f4; }
-      #${POP_ID} .gmp-pop-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      #${POP_ID} .gmp-pop-msg { padding: 4px 16px; font-size: 12px; color: #d93025; }
-      #${POP_ID} .gmp-pop-empty { padding: 8px 16px; color: #5f6368; font-size: 13px; }
-      #${POP_ID} .gmp-pop-all { display: flex; gap: 8px; padding: 8px 16px 4px; border-top: 1px solid #e8eaed; margin-top: 4px; }
-      #${POP_ID} .gmp-pop-all button {
-        flex: 1; padding: 6px 0; border: 1px solid #dadce0; border-radius: 16px; background: #fff;
-        color: #1a73e8; font: inherit; font-size: 13px; cursor: pointer;
-      }
-      #${POP_ID} .gmp-pop-all button:hover { background: #f1f3f4; }
-      @media (prefers-color-scheme: dark) {
-        #${POP_ID} { background: #2d2e30; color: #e8eaed; }
-        #${POP_ID} .gmp-pop-row:hover, #${POP_ID} .gmp-pop-all button:hover { background: #3c4043; }
-        #${POP_ID} .gmp-pop-all button { background: #2d2e30; border-color: #5f6368; color: #8ab4f8; }
-      }
-`;
+      #${RAIL_ID}[data-on="1"] { color: #1a73e8; }
+      #${RAIL_ID}[data-busy] { opacity: .5; cursor: progress; }
+      #${TOAST_ID} {
+        position: fixed; z-index: 10000; padding: 8px 14px; border-radius: 8px;
+        background: #323232; color: #fff; font: 14px Roboto, "Microsoft JhengHei", sans-serif;
+        box-shadow: 0 2px 8px rgba(0,0,0,.3); pointer-events: none;
+      }`;
     document.head.appendChild(st);
   }
 
@@ -509,137 +571,32 @@
     '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">' +
     '<path d="M12 5C6.5 5 2.7 9.1 1.5 12c1.2 2.9 5 7 10.5 7s9.3-4.1 10.5-7C21.3 9.1 17.5 5 12 5zm0 11.5' +
     'A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>';
+  const EYE_OFF_SVG =
+    '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">' +
+    '<path d="M2.1 3.5 3.5 2.1l18.4 18.4-1.4 1.4-3.2-3.2A11.6 11.6 0 0 1 12 19C6.5 19 2.7 14.9 1.5 12' +
+    'a12.7 12.7 0 0 1 3.9-5.2L2.1 3.5zM12 5c5.5 0 9.3 4.1 10.5 7a12.6 12.6 0 0 1-3 4.3l-3.2-3.2A4.5 4.5 0 0 0' +
+    ' 10.9 7.6L8.6 5.3A11 11 0 0 1 12 5zm-4.5 7a4.5 4.5 0 0 0 6.2 4.2l-1.6-1.6A2.5 2.5 0 0 1 9.4 11.9L7.8 10.3' +
+    'c-.2.5-.3 1.1-.3 1.7z"/></svg>';
 
-  let railBusy = false;
+  function paintRail(busyText) {
+    const btn = document.getElementById(RAIL_ID);
+    if (!btn) return;
+    const on = anyVisible();
+    btn.dataset.on = on ? "1" : "0";
+    if (busyText) btn.dataset.busy = "1";
+    else delete btn.dataset.busy;
+    btn.innerHTML = (on ? EYE_SVG : EYE_OFF_SVG) + `<span>${on ? "清單顯示中" : "清單已隱藏"}</span>`;
+    btn.title = busyText || (on ? "點一下：全部清單不顯示在地圖上" : "點一下：全部清單顯示在地圖上");
+  }
+  // saveState() 會呼叫，讓按鈕跟著狀態變
   function railRepaint() {
-    const pop = document.getElementById(POP_ID);
-    if (pop) renderPop(pop);
+    if (!railBusy) paintRail();
   }
-
-  function renderPop(pop, msg) {
-    // 狀態還沒讀到的清單也列出來（開關顯示淡灰），點了一樣能切換
-    const names = [...new Set([...listOrder, ...Object.keys(listState)])];
-    pop.textContent = "";
-    const title = document.createElement("div");
-    title.className = "gmp-pop-title";
-    title.textContent = "清單顯示在地圖上";
-    pop.appendChild(title);
-    if (!names.length) {
-      const empty = document.createElement("div");
-      empty.className = "gmp-pop-empty";
-      empty.textContent = "還沒有清單資料：請先打開一次「已儲存 → 清單」，之後就能在這裡切換。";
-      pop.appendChild(empty);
-      return;
-    }
-    for (const name of names) {
-      const row = document.createElement("div");
-      row.className = "gmp-pop-row";
-      const label = document.createElement("span");
-      label.className = "gmp-pop-name";
-      label.textContent = name;
-      label.title = name;
-      const sw = document.createElement("button");
-      sw.type = "button";
-      sw.className = TOGGLE_CLS;
-      paint(sw, listState[name]);
-      if (railBusy) sw.dataset.busy = "1";
-      row.append(label, sw);
-      row.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        runRail([name]);
-      });
-      pop.appendChild(row);
-    }
-    const all = document.createElement("div");
-    all.className = "gmp-pop-all";
-    const showAll = document.createElement("button");
-    showAll.type = "button";
-    showAll.textContent = "全部顯示";
-    const hideAll = document.createElement("button");
-    hideAll.type = "button";
-    hideAll.textContent = "全部隱藏";
-    showAll.addEventListener("click", (e) => {
-      e.stopPropagation();
-      runRail(names.filter((n) => listState[n] !== true));
-    });
-    hideAll.addEventListener("click", (e) => {
-      e.stopPropagation();
-      runRail(names.filter((n) => listState[n] !== false));
-    });
-    all.append(showAll, hideAll);
-    pop.appendChild(all);
-    if (msg) {
-      const m = document.createElement("div");
-      m.className = "gmp-pop-msg";
-      m.textContent = msg;
-      pop.appendChild(m);
-    }
-  }
-
-  // 一次切換一或多個清單（全部顯示/隱藏時只開關面板一次）
-  async function runRail(names) {
-    if (railBusy || !names.length) return;
-    railBusy = true;
-    railRepaint();
-    let err = "";
-    let opened = false;
-    for (const name of names) {
-      const res = await railToggle(name);
-      if (res.openedByUs) opened = true;
-      if (res.err) {
-        err = res.err;
-        break;
-      }
-    }
-    if (opened) {
-      await sleep(200);
-      closeSavedPanel();
-    }
-    railBusy = false;
-    const pop = document.getElementById(POP_ID);
-    if (pop) renderPop(pop, err);
-  }
-
-  function togglePop(anchor) {
-    const old = document.getElementById(POP_ID);
-    if (old) {
-      old.remove();
-      return;
-    }
-    injectRailStyle();
-    const pop = document.createElement("div");
-    pop.id = POP_ID;
-    ["mousedown", "pointerdown", "click"].forEach((t) =>
-      pop.addEventListener(t, (e) => e.stopPropagation())
-    );
-    renderPop(pop);
-    document.body.appendChild(pop);
-    const r = anchor.getBoundingClientRect();
-    pop.style.left = `${Math.round(r.right + 8)}px`;
-    // 按鈕在左下角，小視窗底部對齊按鈕往上長
-    pop.style.top = `${Math.max(8, Math.round(r.bottom) - pop.offsetHeight)}px`;
-  }
-
-  // 點小視窗外面或按 Esc 就收起來（自動操作進行中不收，免得看不到結果）
-  document.addEventListener(
-    "mousedown",
-    (e) => {
-      const pop = document.getElementById(POP_ID);
-      if (!pop || railBusy || pop.contains(e.target)) return;
-      if (e.target instanceof Element && e.target.closest("#" + RAIL_ID)) return;
-      pop.remove();
-    },
-    true
-  );
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && e.isTrusted && !railBusy) document.getElementById(POP_ID)?.remove();
-  });
 
   function onRailClick(e) {
     e.preventDefault();
     e.stopPropagation();
-    togglePop(e.currentTarget);
+    toggleAll();
   }
 
   // 固定在左側欄最底部。不塞進 Maps 自己的 DOM：Maps 會一直重繪左側欄，
@@ -649,7 +606,6 @@
     const now = Date.now();
     if (now - ensureRail.last < 1000) return;
     ensureRail.last = now;
-    // 對齊左側欄的位置與寬度（找不到「最近」就用預設值）
     const recent = findRailItem(RAIL_RECENT);
     let btn = document.getElementById(RAIL_ID);
     if (!btn) {
@@ -657,23 +613,21 @@
       btn = document.createElement("button");
       btn.type = "button";
       btn.id = RAIL_ID;
-      btn.title = "清單顯示開關";
-      btn.innerHTML = EYE_SVG + "<span>清單開關</span>";
       btn.addEventListener("click", onRailClick, true);
       ["mousedown", "pointerdown"].forEach((t) =>
         btn.addEventListener(t, (e) => e.stopPropagation(), true)
       );
       document.body.appendChild(btn);
+      paintRail();
     }
     if (recent) {
+      // 對齊左側欄中線
       const r = recent.getBoundingClientRect();
-      const cx = Math.round(r.left + r.width / 2);
-      btn.style.left = `${cx - 36}px`;
+      btn.style.left = `${Math.round(r.left + r.width / 2) - 36}px`;
       btn.style.display = "";
-    } else {
+    } else if (!railBusy) {
       // 街景等沒有左側欄的畫面就藏起來，避免擋到
       btn.style.display = "none";
-      document.getElementById(POP_ID)?.remove();
     }
   }
   addEventListener("resize", () => {
