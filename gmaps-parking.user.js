@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.8
-// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角「清單開關」一鍵全部顯示／全部隱藏
+// @version      2.9
+// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角開關一鍵切換「想去的地點」顯示
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
@@ -385,8 +385,8 @@
         btn.addEventListener(t, (e) => e.stopPropagation(), true)
       );
       found.menuBtn.parentElement.insertBefore(btn, found.menuBtn);
-      // 沒記錄過的清單，靜默探一次真實狀態
-      if (!(name in listState)) {
+      // 沒記錄過的清單，靜默探一次真實狀態（左下角開關在背後操作時不探，免得拖慢）
+      if (!(name in listState) && !document.documentElement.classList.contains("gmp-auto")) {
         operate(row, "probe").then((v) => {
           if (v == null) return;
           listState[name] = v;
@@ -407,10 +407,10 @@
     ensureListToggles(true);
   });
 
-  // ───────── 左下角「清單開關」：一鍵全部顯示／全部隱藏 ─────────
+  // ───────── 左下角開關：只切換「想去的地點」 ─────────
   // Google 只有「已儲存 → 清單 → ⋮」能切換清單顯示，沒有別的入口，所以腳本會在背後
-  // 打開「已儲存」面板操作，期間把面板和選單都設成透明，做完再收起來。
-  // 方向：目前有任一清單顯示中 → 全部隱藏；全部都隱藏 → 全部顯示。
+  // 打開「已儲存」面板操作，期間把面板和選單設成透明，做完再收起來（約 1～2 秒）。
+  const TARGET_NAMES = ["想去的地點", "Want to go"];
   const RAIL_ID = "gmp-rail-lists";
   const TOAST_ID = "gmp-rail-toast";
   const AUTO_CLS = "gmp-auto";
@@ -458,16 +458,18 @@
     if (saved) saved.click();
   }
 
-  function anyVisible() {
-    return Object.values(listState).some((v) => v === true);
+  const targetName = () => TARGET_NAMES.find((n) => n in listState) || TARGET_NAMES[0];
+  function targetRow() {
+    for (const row of rows)
+      if (TARGET_NAMES.includes(row.name) && row.menuBtn.isConnected) return row;
+    return null;
   }
 
   let railBusy = false;
-  async function toggleAll() {
+  async function toggleTarget() {
     if (railBusy) return;
     railBusy = true;
-    const want = !anyVisible();
-    paintRail(want ? "正在全部顯示…" : "正在全部隱藏…");
+    paintRail(true);
     const html = document.documentElement;
     html.classList.add(AUTO_CLS, PROBING_CLS);
     let openedByUs = false;
@@ -475,49 +477,38 @@
     let msg = "";
     try {
       ensureListToggles(true);
-      let tab = findListsTab();
-      if (!tab) {
-        const saved = findRailItem(RAIL_SAVED);
-        if (!saved) throw new Error("找不到左側欄的「已儲存」");
-        saved.click();
-        openedByUs = true;
-        tab = await waitFor(findListsTab, 4000);
-        if (!tab) throw new Error("打不開「已儲存 → 清單」");
+      let row = targetRow();
+      if (!row) {
+        let tab = findListsTab();
+        if (!tab) {
+          const saved = findRailItem(RAIL_SAVED);
+          if (!saved) throw new Error("找不到左側欄的「已儲存」");
+          saved.click();
+          openedByUs = true;
+          tab = await waitFor(findListsTab, 4000);
+          if (!tab) throw new Error("打不開「已儲存 → 清單」");
+        }
+        if (openedByUs) {
+          hidden = findSavedPanel(tab);
+          if (hidden) hidden.style.setProperty("opacity", "0", "important");
+        }
+        if (tab.getAttribute("aria-selected") !== "true") tab.click();
+        row = await waitFor(() => (ensureListToggles(true), targetRow()), 4000);
+        if (!row) throw new Error(`「已儲存」裡找不到「${TARGET_NAMES[0]}」`);
       }
-      // 是我們打開的面板就設透明，使用者看不到
-      if (openedByUs) {
-        hidden = findSavedPanel(tab);
-        if (hidden) hidden.style.setProperty("opacity", "0", "important");
-      }
-      if (tab.getAttribute("aria-selected") !== "true") tab.click();
-      await waitFor(() => {
-        ensureListToggles(true);
-        return [...rows].some((r) => r.menuBtn.isConnected);
-      }, 4000);
-      await sleep(300); // 等清單列都渲染出來
-      ensureListToggles(true);
-      const targets = [...rows].filter((r) => r.menuBtn.isConnected);
-      if (!targets.length) throw new Error("「已儲存」裡找不到任何清單");
-      let ok = 0;
-      for (const row of targets) {
-        const v = await operate(row, want);
-        if (v == null) continue;
-        ok++;
-        listState[row.name] = v;
-        paint(row.btn, v);
-      }
+      // 以選單上的實際狀態為準反轉（不靠記錄，避免記錯）
+      const v = await operate(row, "toggle");
+      if (v == null) throw new Error("找不到「顯示在你的地圖上」選項");
+      listState[row.name] = v;
+      paint(row.btn, v);
       saveState();
-      msg =
-        ok === targets.length
-          ? `已全部${want ? "顯示" : "隱藏"}（${ok} 個清單）`
-          : `已${want ? "顯示" : "隱藏"} ${ok}/${targets.length} 個清單，其餘請到「已儲存」手動切換`;
     } catch (e) {
       msg = e.message || String(e);
     } finally {
       if (openedByUs) {
-        await sleep(150);
+        await sleep(100);
         closeSavedPanel();
-        await sleep(300);
+        await sleep(250);
       }
       if (hidden) hidden.style.removeProperty("opacity");
       html.classList.remove(AUTO_CLS, PROBING_CLS);
@@ -557,8 +548,7 @@
         font: 500 12px Roboto, "Microsoft JhengHei", sans-serif;
       }
       #${RAIL_ID}:hover { background: rgba(60,64,67,.08); }
-      #${RAIL_ID}[data-on="1"] { color: #1a73e8; }
-      #${RAIL_ID}[data-busy] { opacity: .5; cursor: progress; }
+      #${RAIL_ID} .gmp-rail-label { max-width: 68px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       #${TOAST_ID} {
         position: fixed; z-index: 10000; padding: 8px 14px; border-radius: 8px;
         background: #323232; color: #fff; font: 14px Roboto, "Microsoft JhengHei", sans-serif;
@@ -567,28 +557,24 @@
     document.head.appendChild(st);
   }
 
-  const EYE_SVG =
-    '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">' +
-    '<path d="M12 5C6.5 5 2.7 9.1 1.5 12c1.2 2.9 5 7 10.5 7s9.3-4.1 10.5-7C21.3 9.1 17.5 5 12 5zm0 11.5' +
-    'A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>';
-  const EYE_OFF_SVG =
-    '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">' +
-    '<path d="M2.1 3.5 3.5 2.1l18.4 18.4-1.4 1.4-3.2-3.2A11.6 11.6 0 0 1 12 19C6.5 19 2.7 14.9 1.5 12' +
-    'a12.7 12.7 0 0 1 3.9-5.2L2.1 3.5zM12 5c5.5 0 9.3 4.1 10.5 7a12.6 12.6 0 0 1-3 4.3l-3.2-3.2A4.5 4.5 0 0 0' +
-    ' 10.9 7.6L8.6 5.3A11 11 0 0 1 12 5zm-4.5 7a4.5 4.5 0 0 0 6.2 4.2l-1.6-1.6A2.5 2.5 0 0 1 9.4 11.9L7.8 10.3' +
-    'c-.2.5-.3 1.1-.3 1.7z"/></svg>';
-
-  function paintRail(busyText) {
+  function paintRail(busy) {
     const btn = document.getElementById(RAIL_ID);
     if (!btn) return;
-    const on = anyVisible();
-    btn.dataset.on = on ? "1" : "0";
-    if (busyText) btn.dataset.busy = "1";
-    else delete btn.dataset.busy;
-    btn.innerHTML = (on ? EYE_SVG : EYE_OFF_SVG) + `<span>${on ? "清單顯示中" : "清單已隱藏"}</span>`;
-    btn.title = busyText || (on ? "點一下：全部清單不顯示在地圖上" : "點一下：全部清單顯示在地圖上");
+    const name = targetName();
+    const v = listState[name];
+    let sw = btn.querySelector("." + TOGGLE_CLS);
+    if (!sw) {
+      btn.innerHTML = `<span class="${TOGGLE_CLS}"></span><span class="gmp-rail-label"></span>`;
+      sw = btn.querySelector("." + TOGGLE_CLS);
+    }
+    btn.querySelector(".gmp-rail-label").textContent = name;
+    sw.dataset.state = v == null ? "unknown" : v ? "on" : "off";
+    if (busy) sw.dataset.busy = "1";
+    else delete sw.dataset.busy;
+    btn.setAttribute("aria-pressed", v ? "true" : "false");
+    btn.title = v ? `「${name}」顯示中，點一下不顯示在地圖上` : `點一下讓「${name}」顯示在地圖上`;
   }
-  // saveState() 會呼叫，讓按鈕跟著狀態變
+  // saveState() 會呼叫，讓開關跟著狀態變（在「已儲存」裡手動切也會同步）
   function railRepaint() {
     if (!railBusy) paintRail();
   }
@@ -596,7 +582,7 @@
   function onRailClick(e) {
     e.preventDefault();
     e.stopPropagation();
-    toggleAll();
+    toggleTarget();
   }
 
   // 固定在左側欄最底部。不塞進 Maps 自己的 DOM：Maps 會一直重繪左側欄，
