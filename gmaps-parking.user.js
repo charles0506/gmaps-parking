@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.5
-// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關
+// @version      2.6
+// @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左側欄加「清單開關」鈕，不用開已儲存就能切換
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/gmaps-parking/main/gmaps-parking.user.js
@@ -147,7 +147,15 @@
   try {
     listState = JSON.parse(GM_getValue(STATE_KEY, "{}")) || {};
   } catch (e) {}
-  const saveState = () => GM_setValue(STATE_KEY, JSON.stringify(listState));
+  const ORDER_KEY = "list_order"; // 清單在「已儲存」裡的順序，給左側欄小視窗用
+  let listOrder = [];
+  try {
+    listOrder = JSON.parse(GM_getValue(ORDER_KEY, "[]")) || [];
+  } catch (e) {}
+  const saveState = () => {
+    GM_setValue(STATE_KEY, JSON.stringify(listState));
+    railRepaint();
+  };
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   async function waitFor(fn, timeout = 1500) {
@@ -292,10 +300,10 @@
 
   const rows = new Set();
   let lastScan = 0;
-  function ensureListToggles() {
+  function ensureListToggles(force) {
     // Maps DOM 變動極頻繁，掃描節流到 400ms 一次
     const now = Date.now();
-    if (now - lastScan < 400) {
+    if (!force && now - lastScan < 400) {
       clearTimeout(ensureListToggles.t);
       ensureListToggles.t = setTimeout(ensureListToggles, 450);
       return;
@@ -305,6 +313,20 @@
     const counts = [...document.querySelectorAll("div, span")].filter(
       (el) => !el.children.length && COUNT_RE.test(el.textContent.trim())
     );
+    // 記下清單順序，給左側欄小視窗照同樣順序排
+    if (counts.length) {
+      const names = counts
+        .map((c) => {
+          const f = findRow(c);
+          return f ? listName(c, f.container) : "";
+        })
+        .filter(Boolean);
+      const merged = [...new Set([...names, ...listOrder.filter((n) => !names.includes(n))])];
+      if (names.length && merged.join("\n") !== listOrder.join("\n")) {
+        listOrder = merged;
+        GM_setValue(ORDER_KEY, JSON.stringify(listOrder));
+      }
+    }
     for (const countEl of counts) {
       const found = findRow(countEl);
       if (!found || found.container.querySelector("." + TOGGLE_CLS)) continue;
@@ -354,11 +376,320 @@
 
   GM_registerMenuCommand("🔄 重新讀取清單顯示狀態", () => {
     listState = {};
+    listOrder = [];
+    GM_setValue(ORDER_KEY, "[]");
     saveState();
     for (const row of rows) row.btn.remove();
     rows.clear();
-    ensureListToggles();
+    ensureListToggles(true);
   });
+
+  // ───────── 左側欄「清單開關」：不用打開已儲存就能切換 ─────────
+  // 左側欄本身沒有清單資料，所以切換時腳本會：
+  //   已在畫面上的列 → 直接切；否則自動打開「已儲存 → 清單」→ 切換 → 若是我們打開的就再關掉。
+  // 清單名稱與狀態取自之前在「已儲存」裡看過的紀錄（listState / listOrder）。
+  const RAIL_ID = "gmp-rail-lists";
+  const POP_ID = "gmp-rail-pop";
+  const RAIL_SAVED = ["已儲存", "Saved"];
+  const RAIL_RECENT = ["最近", "Recents", "Recent"];
+  const LISTS_TAB = ["清單", "Lists"];
+
+  // 找左側欄的某個項目：文字完全相同、可見、取最靠左那個（避免撞到地點頁的「已儲存」鈕）
+  function findRailItem(labels) {
+    let best = null;
+    let bestX = Infinity;
+    for (const el of document.querySelectorAll("div, span, label")) {
+      if (el.children.length || !labels.includes(cleanLabel(el.textContent))) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || r.x > 160) continue; // 左側欄很窄
+      const item = el.closest("button, a, [role='button'], [role='tab']");
+      if (item && !item.closest("#" + RAIL_ID) && r.x < bestX) {
+        bestX = r.x;
+        best = item;
+      }
+    }
+    return best;
+  }
+
+  function findListsTab() {
+    return [...document.querySelectorAll("[role='tab'], button")].find(
+      (el) => LISTS_TAB.includes(cleanLabel(el.textContent)) && el.getBoundingClientRect().width > 0
+    );
+  }
+
+  function rowByName(name) {
+    for (const row of rows) if (row.name === name && row.menuBtn.isConnected) return row;
+    return null;
+  }
+
+  // 不開「已儲存」面板時，替使用者跑一遍：開面板 → 清單分頁 → 切換 → 關面板
+  // 回傳 openedByUs，讓呼叫端在全部做完後才關面板（全部顯示/隱藏時只開關一次）
+  function railToggle(name) {
+    return enqueue(async () => {
+      let openedByUs = false;
+      ensureListToggles(true);
+      let row = rowByName(name);
+      if (!row) {
+        let tab = findListsTab();
+        if (!tab) {
+          const saved = findRailItem(RAIL_SAVED);
+          if (!saved) return { err: "找不到左側欄的「已儲存」" };
+          saved.click();
+          openedByUs = true;
+          tab = await waitFor(findListsTab, 4000);
+        }
+        if (!tab) return { err: "打不開「已儲存 → 清單」", openedByUs };
+        if (tab.getAttribute("aria-selected") !== "true") tab.click();
+        row = await waitFor(() => (ensureListToggles(true), rowByName(name)), 4000);
+        if (!row) return { err: `「已儲存」裡找不到清單「${name}」`, openedByUs };
+      }
+      return { row, openedByUs };
+    }).then(async (res) => {
+      // operate 自己會排隊，所以要在上一段 enqueue 結束後才呼叫，避免互等卡死
+      if (!res.row) return { err: res.err, openedByUs: res.openedByUs };
+      const v = await operate(res.row, true);
+      if (v == null) return { err: "找不到「顯示在你的地圖上」選項", openedByUs: res.openedByUs };
+      listState[name] = v;
+      saveState();
+      paint(res.row.btn, v);
+      return { v, openedByUs: res.openedByUs };
+    });
+  }
+
+  function closeSavedPanel() {
+    // 再點一次左側欄「已儲存」會把面板收起來
+    const saved = findRailItem(RAIL_SAVED);
+    if (saved) saved.click();
+  }
+
+  let railStyleDone = false;
+  function injectRailStyle() {
+    if (railStyleDone) return;
+    railStyleDone = true;
+    injectToggleStyle();
+    const st = document.createElement("style");
+    st.textContent = `
+      #${POP_ID} {
+        position: fixed; z-index: 10000; min-width: 240px; max-width: 320px; max-height: 70vh;
+        overflow: auto; padding: 8px 0; background: #fff; color: #202124; border-radius: 12px;
+        box-shadow: 0 4px 16px rgba(0,0,0,.25);
+        font: 14px/1.4 Roboto, "Microsoft JhengHei", sans-serif;
+      }
+      #${POP_ID} .gmp-pop-title { padding: 6px 16px 8px; font-weight: 500; color: #5f6368; font-size: 13px; }
+      #${POP_ID} .gmp-pop-row {
+        display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 16px; cursor: pointer;
+      }
+      #${POP_ID} .gmp-pop-row:hover { background: #f1f3f4; }
+      #${POP_ID} .gmp-pop-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #${POP_ID} .gmp-pop-msg { padding: 4px 16px; font-size: 12px; color: #d93025; }
+      #${POP_ID} .gmp-pop-empty { padding: 8px 16px; color: #5f6368; font-size: 13px; }
+      #${POP_ID} .gmp-pop-all { display: flex; gap: 8px; padding: 8px 16px 4px; border-top: 1px solid #e8eaed; margin-top: 4px; }
+      #${POP_ID} .gmp-pop-all button {
+        flex: 1; padding: 6px 0; border: 1px solid #dadce0; border-radius: 16px; background: #fff;
+        color: #1a73e8; font: inherit; font-size: 13px; cursor: pointer;
+      }
+      #${POP_ID} .gmp-pop-all button:hover { background: #f1f3f4; }
+      @media (prefers-color-scheme: dark) {
+        #${POP_ID} { background: #2d2e30; color: #e8eaed; }
+        #${POP_ID} .gmp-pop-row:hover, #${POP_ID} .gmp-pop-all button:hover { background: #3c4043; }
+        #${POP_ID} .gmp-pop-all button { background: #2d2e30; border-color: #5f6368; color: #8ab4f8; }
+      }
+`;
+    document.head.appendChild(st);
+  }
+
+  const EYE_SVG =
+    '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">' +
+    '<path d="M12 5C6.5 5 2.7 9.1 1.5 12c1.2 2.9 5 7 10.5 7s9.3-4.1 10.5-7C21.3 9.1 17.5 5 12 5zm0 11.5' +
+    'A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>';
+
+  let railBusy = false;
+  function railRepaint() {
+    const pop = document.getElementById(POP_ID);
+    if (pop) renderPop(pop);
+  }
+
+  function renderPop(pop, msg) {
+    const names = [...new Set([...listOrder, ...Object.keys(listState)])].filter((n) => n in listState);
+    pop.textContent = "";
+    const title = document.createElement("div");
+    title.className = "gmp-pop-title";
+    title.textContent = "清單顯示在地圖上";
+    pop.appendChild(title);
+    if (!names.length) {
+      const empty = document.createElement("div");
+      empty.className = "gmp-pop-empty";
+      empty.textContent = "還沒有清單資料：請先打開一次「已儲存 → 清單」，之後就能在這裡切換。";
+      pop.appendChild(empty);
+      return;
+    }
+    for (const name of names) {
+      const row = document.createElement("div");
+      row.className = "gmp-pop-row";
+      const label = document.createElement("span");
+      label.className = "gmp-pop-name";
+      label.textContent = name;
+      label.title = name;
+      const sw = document.createElement("button");
+      sw.type = "button";
+      sw.className = TOGGLE_CLS;
+      paint(sw, listState[name]);
+      if (railBusy) sw.dataset.busy = "1";
+      row.append(label, sw);
+      row.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        runRail([name]);
+      });
+      pop.appendChild(row);
+    }
+    const all = document.createElement("div");
+    all.className = "gmp-pop-all";
+    const showAll = document.createElement("button");
+    showAll.type = "button";
+    showAll.textContent = "全部顯示";
+    const hideAll = document.createElement("button");
+    hideAll.type = "button";
+    hideAll.textContent = "全部隱藏";
+    showAll.addEventListener("click", (e) => {
+      e.stopPropagation();
+      runRail(names.filter((n) => listState[n] !== true));
+    });
+    hideAll.addEventListener("click", (e) => {
+      e.stopPropagation();
+      runRail(names.filter((n) => listState[n] !== false));
+    });
+    all.append(showAll, hideAll);
+    pop.appendChild(all);
+    if (msg) {
+      const m = document.createElement("div");
+      m.className = "gmp-pop-msg";
+      m.textContent = msg;
+      pop.appendChild(m);
+    }
+  }
+
+  // 一次切換一或多個清單（全部顯示/隱藏時只開關面板一次）
+  async function runRail(names) {
+    if (railBusy || !names.length) return;
+    railBusy = true;
+    railRepaint();
+    let err = "";
+    let opened = false;
+    for (const name of names) {
+      const res = await railToggle(name);
+      if (res.openedByUs) opened = true;
+      if (res.err) {
+        err = res.err;
+        break;
+      }
+    }
+    if (opened) {
+      await sleep(200);
+      closeSavedPanel();
+    }
+    railBusy = false;
+    const pop = document.getElementById(POP_ID);
+    if (pop) renderPop(pop, err);
+  }
+
+  function togglePop(anchor) {
+    const old = document.getElementById(POP_ID);
+    if (old) {
+      old.remove();
+      return;
+    }
+    injectRailStyle();
+    const pop = document.createElement("div");
+    pop.id = POP_ID;
+    ["mousedown", "pointerdown", "click"].forEach((t) =>
+      pop.addEventListener(t, (e) => e.stopPropagation())
+    );
+    renderPop(pop);
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = `${Math.round(r.right + 8)}px`;
+    pop.style.top = `${Math.max(8, Math.min(Math.round(r.top), innerHeight - pop.offsetHeight - 8))}px`;
+  }
+
+  // 點小視窗外面或按 Esc 就收起來（自動操作進行中不收，免得看不到結果）
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      const pop = document.getElementById(POP_ID);
+      if (!pop || railBusy || pop.contains(e.target)) return;
+      if (e.target instanceof Element && e.target.closest("#" + RAIL_ID)) return;
+      pop.remove();
+    },
+    true
+  );
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && e.isTrusted && !railBusy) document.getElementById(POP_ID)?.remove();
+  });
+
+  function onRailClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    togglePop(e.currentTarget);
+  }
+
+  // 複製左側欄「最近」那顆，外觀跟原生一致，插在它下面
+  ensureRail.last = 0;
+  function ensureRail() {
+    const existing = document.getElementById(RAIL_ID);
+    if (existing && existing.isConnected) return;
+    // 沒有左側欄時（街景等）不要每個 frame 掃全頁
+    const now = Date.now();
+    if (now - ensureRail.last < 500) return;
+    ensureRail.last = now;
+    const recent = findRailItem(RAIL_RECENT);
+    if (!recent) {
+      // 找不到左側欄（例如街景）就不放，避免擋畫面
+      return;
+    }
+    // 跟分類鈕一樣：若外層只包這一顆，就複製外層才不會跑版
+    const unit =
+      recent.parentElement && recent.parentElement.children.length === 1
+        ? recent.parentElement
+        : recent;
+    const clone = unit.cloneNode(true);
+    [clone, ...clone.querySelectorAll("*")].forEach((el) => {
+      el.removeAttribute("jsaction");
+      el.removeAttribute("aria-selected");
+      el.removeAttribute("aria-pressed");
+      el.removeAttribute("aria-current");
+      el.removeAttribute("id");
+    });
+    const btn =
+      clone.matches("button, a, [role='button'], [role='tab']")
+        ? clone
+        : clone.querySelector("button, a, [role='button'], [role='tab']") || clone;
+    btn.id = RAIL_ID;
+    btn.title = "清單顯示開關";
+    if (btn.tagName === "A") btn.removeAttribute("href");
+
+    const leaves = [...btn.querySelectorAll("*")].filter(
+      (el) => !el.children.length && el.textContent.trim()
+    );
+    const labelEl = leaves.find((el) => RAIL_RECENT.includes(cleanLabel(el.textContent)));
+    if (labelEl) labelEl.textContent = "清單開關";
+    // 圖示：icon font 字元或 img/svg，換成眼睛
+    const iconEl =
+      leaves.find((el) => el !== labelEl && /[\uE000-\uF8FF]/.test(el.textContent)) ||
+      btn.querySelector("img, svg");
+    if (iconEl) {
+      const holder = document.createElement("span");
+      holder.style.cssText = "display:inline-flex;align-items:center;justify-content:center;";
+      holder.innerHTML = EYE_SVG;
+      iconEl.replaceWith(holder);
+    }
+    btn.addEventListener("click", onRailClick, true);
+    ["mousedown", "pointerdown"].forEach((t) =>
+      btn.addEventListener(t, (e) => e.stopPropagation(), true)
+    );
+    unit.after(clone);
+  }
+
 
   function onChipClick(e) {
     e.preventDefault();
@@ -454,6 +785,7 @@
       enableTraffic(); // 裸 /maps 載入時要等座標進網址才補路況參數
       ensure();
       ensureListToggles();
+      ensureRail();
     });
   }
 
@@ -461,6 +793,7 @@
     enableTraffic();
     ensure();
     ensureListToggles();
+    ensureRail();
     new MutationObserver(onMutate).observe(document.body, {
       childList: true,
       subtree: true,
