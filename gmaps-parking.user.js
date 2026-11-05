@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.6
+// @version      2.7
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左側欄加「清單開關」鈕，不用開已儲存就能切換
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -139,7 +139,7 @@
   const PROBING_CLS = "gmp-probing";
   const STATE_KEY = "list_visibility"; // { 清單名稱: true(顯示)/false(隱藏) }
   // 「私人·1,308 個地點」「Private · 40 places」
-  const COUNT_RE = /^(私人|公開|共用|已共用|Private|Public|Shared)?\s*[·・•]?\s*[\d,]+\s*(個地點|places?)$/i;
+  const COUNT_RE = /^(私人|公開|共用|已共用|分享|已分享|Private|Public|Shared)?\s*[·・•]?\s*[\d,]+\s*(個地點|places?)$/i;
   const SHOW_ITEM_RE = /顯示在你的地圖上|顯示在地圖上|(show|hide).*(on|in) your map/i;
   const HIDE_WORD_RE = /不顯示|隱藏|hide|don.?t show/i; // 選單寫「不顯示」= 目前是顯示中
 
@@ -475,6 +475,13 @@
         box-shadow: 0 4px 16px rgba(0,0,0,.25);
         font: 14px/1.4 Roboto, "Microsoft JhengHei", sans-serif;
       }
+      #${RAIL_ID} {
+        position: fixed; bottom: 16px; left: 0; z-index: 9999; width: 72px; padding: 6px 0;
+        display: flex; flex-direction: column; align-items: center; gap: 2px;
+        border: none; border-radius: 12px; background: transparent; color: #3c4043; cursor: pointer;
+        font: 500 12px Roboto, "Microsoft JhengHei", sans-serif;
+      }
+      #${RAIL_ID}:hover { background: rgba(60,64,67,.08); }
       #${POP_ID} .gmp-pop-title { padding: 6px 16px 8px; font-weight: 500; color: #5f6368; font-size: 13px; }
       #${POP_ID} .gmp-pop-row {
         display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 16px; cursor: pointer;
@@ -510,7 +517,8 @@
   }
 
   function renderPop(pop, msg) {
-    const names = [...new Set([...listOrder, ...Object.keys(listState)])].filter((n) => n in listState);
+    // 狀態還沒讀到的清單也列出來（開關顯示淡灰），點了一樣能切換
+    const names = [...new Set([...listOrder, ...Object.keys(listState)])];
     pop.textContent = "";
     const title = document.createElement("div");
     title.className = "gmp-pop-title";
@@ -609,7 +617,8 @@
     document.body.appendChild(pop);
     const r = anchor.getBoundingClientRect();
     pop.style.left = `${Math.round(r.right + 8)}px`;
-    pop.style.top = `${Math.max(8, Math.min(Math.round(r.top), innerHeight - pop.offsetHeight - 8))}px`;
+    // 按鈕在左下角，小視窗底部對齊按鈕往上長
+    pop.style.top = `${Math.max(8, Math.round(r.bottom) - pop.offsetHeight)}px`;
   }
 
   // 點小視窗外面或按 Esc 就收起來（自動操作進行中不收，免得看不到結果）
@@ -633,63 +642,44 @@
     togglePop(e.currentTarget);
   }
 
-  // 複製左側欄「最近」那顆，外觀跟原生一致，插在它下面
+  // 固定在左側欄最底部。不塞進 Maps 自己的 DOM：Maps 會一直重繪左側欄，
+  // 塞在裡面會被刪掉再補回來而一直閃；掛在 body 上的固定元素不受影響。
   ensureRail.last = 0;
   function ensureRail() {
-    const existing = document.getElementById(RAIL_ID);
-    if (existing && existing.isConnected) return;
-    // 沒有左側欄時（街景等）不要每個 frame 掃全頁
     const now = Date.now();
-    if (now - ensureRail.last < 500) return;
+    if (now - ensureRail.last < 1000) return;
     ensureRail.last = now;
+    // 對齊左側欄的位置與寬度（找不到「最近」就用預設值）
     const recent = findRailItem(RAIL_RECENT);
-    if (!recent) {
-      // 找不到左側欄（例如街景）就不放，避免擋畫面
-      return;
+    let btn = document.getElementById(RAIL_ID);
+    if (!btn) {
+      injectRailStyle();
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = RAIL_ID;
+      btn.title = "清單顯示開關";
+      btn.innerHTML = EYE_SVG + "<span>清單開關</span>";
+      btn.addEventListener("click", onRailClick, true);
+      ["mousedown", "pointerdown"].forEach((t) =>
+        btn.addEventListener(t, (e) => e.stopPropagation(), true)
+      );
+      document.body.appendChild(btn);
     }
-    // 跟分類鈕一樣：若外層只包這一顆，就複製外層才不會跑版
-    const unit =
-      recent.parentElement && recent.parentElement.children.length === 1
-        ? recent.parentElement
-        : recent;
-    const clone = unit.cloneNode(true);
-    [clone, ...clone.querySelectorAll("*")].forEach((el) => {
-      el.removeAttribute("jsaction");
-      el.removeAttribute("aria-selected");
-      el.removeAttribute("aria-pressed");
-      el.removeAttribute("aria-current");
-      el.removeAttribute("id");
-    });
-    const btn =
-      clone.matches("button, a, [role='button'], [role='tab']")
-        ? clone
-        : clone.querySelector("button, a, [role='button'], [role='tab']") || clone;
-    btn.id = RAIL_ID;
-    btn.title = "清單顯示開關";
-    if (btn.tagName === "A") btn.removeAttribute("href");
-
-    const leaves = [...btn.querySelectorAll("*")].filter(
-      (el) => !el.children.length && el.textContent.trim()
-    );
-    const labelEl = leaves.find((el) => RAIL_RECENT.includes(cleanLabel(el.textContent)));
-    if (labelEl) labelEl.textContent = "清單開關";
-    // 圖示：icon font 字元或 img/svg，換成眼睛
-    const iconEl =
-      leaves.find((el) => el !== labelEl && /[\uE000-\uF8FF]/.test(el.textContent)) ||
-      btn.querySelector("img, svg");
-    if (iconEl) {
-      const holder = document.createElement("span");
-      holder.style.cssText = "display:inline-flex;align-items:center;justify-content:center;";
-      holder.innerHTML = EYE_SVG;
-      iconEl.replaceWith(holder);
+    if (recent) {
+      const r = recent.getBoundingClientRect();
+      const cx = Math.round(r.left + r.width / 2);
+      btn.style.left = `${cx - 36}px`;
+      btn.style.display = "";
+    } else {
+      // 街景等沒有左側欄的畫面就藏起來，避免擋到
+      btn.style.display = "none";
+      document.getElementById(POP_ID)?.remove();
     }
-    btn.addEventListener("click", onRailClick, true);
-    ["mousedown", "pointerdown"].forEach((t) =>
-      btn.addEventListener(t, (e) => e.stopPropagation(), true)
-    );
-    unit.after(clone);
   }
-
+  addEventListener("resize", () => {
+    ensureRail.last = 0;
+    ensureRail();
+  });
 
   function onChipClick(e) {
     e.preventDefault();
