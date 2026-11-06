@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.14
+// @version      2.15
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角開關一鍵切換「想去的地點」顯示
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -504,8 +504,18 @@
         if (!row) throw new Error(`「已儲存」裡找不到「${TARGET_NAMES[0]}」`);
       }
       // 以選單上的實際狀態為準反轉（不靠記錄，避免記錯）
-      const v = await operate(row, "toggle");
-      if (v == null) throw new Error("找不到「顯示在你的地圖上」選項");
+      const want = await operate(row, "toggle");
+      if (want == null) throw new Error("找不到「顯示在你的地圖上」選項");
+      // 使用者回報要點兩次才真的關：點完就收面板，Google 可能還沒存好。
+      // 所以重開選單確認狀態真的變了；沒變就再設一次，最多試 3 輪。
+      let v = null;
+      for (let i = 0; i < 3; i++) {
+        await sleep(400);
+        v = await operate(row, "probe");
+        if (v === want) break;
+        if (v != null) await operate(row, want);
+      }
+      if (v !== want) throw new Error("Google 沒有接受切換，請再點一次或到「已儲存」手動切換");
       listState[row.name] = v;
       paint(row.btn, v);
       saveState();
@@ -513,7 +523,7 @@
       msg = e.message || String(e);
     } finally {
       if (openedByUs) {
-        await sleep(100);
+        await sleep(300); // 讓 Google 把設定送出去再離開面板
         // 診斷確認（v2.11）：開「已儲存」會把網址換成已儲存頁並新增一筆歷史，
         // 再點一次「已儲存」只收面板、網址不回來，原本的路線就沒了。
         // 改用「回上一頁」收面板：路線、地點頁、搜尋結果都會原樣回來，不用重新載入。
