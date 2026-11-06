@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.13
+// @version      2.14
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角開關一鍵切換「想去的地點」顯示
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -472,9 +472,8 @@
   }
 
   let railBusy = false;
-  async function toggleTarget(trace = () => {}) {
+  async function toggleTarget() {
     if (railBusy) return;
-    trace("開始");
     railBusy = true;
     paintRail(true);
     const html = document.documentElement;
@@ -493,9 +492,7 @@
           if (!saved) throw new Error("找不到左側欄的「已儲存」");
           saved.click();
           openedByUs = true;
-          trace("點了已儲存");
           tab = await waitFor(findListsTab, 4000);
-          trace("已儲存面板出現");
           if (!tab) throw new Error("打不開「已儲存 → 清單」");
         }
         if (openedByUs) {
@@ -504,12 +501,10 @@
         }
         if (tab.getAttribute("aria-selected") !== "true") tab.click();
         row = await waitFor(() => (ensureListToggles(true), targetRow()), 4000);
-        trace("清單分頁出現");
         if (!row) throw new Error(`「已儲存」裡找不到「${TARGET_NAMES[0]}」`);
       }
       // 以選單上的實際狀態為準反轉（不靠記錄，避免記錯）
       const v = await operate(row, "toggle");
-      trace("切換完成");
       if (v == null) throw new Error("找不到「顯示在你的地圖上」選項");
       listState[row.name] = v;
       paint(row.btn, v);
@@ -531,7 +526,6 @@
           closeSavedPanel();
           await sleep(250);
         }
-        trace("收起已儲存");
       }
       if (hidden) hidden.style.removeProperty("opacity");
       html.classList.remove(AUTO_CLS, PROBING_CLS);
@@ -542,150 +536,6 @@
   }
 
 
-  // ───────── 路線診斷：看開關「已儲存」面板時，網址與路線怎麼變 ─────────
-  // 會真的切換一次「想去的地點」，再試 history.back() 能不能把路線找回來，結果顯示在視窗裡讓使用者複製。
-  function routeSnapshot() {
-    const inputs = [...document.querySelectorAll("input")].filter(
-      (el) => el.offsetParent !== null && el.value
-    );
-    const dirBox = document.querySelector(
-      "#directions-searchbox-0, #directions-searchbox-1, [aria-label*='起點'], [aria-label*='Starting point'], [aria-label*='目的地'], [aria-label*='destination']"
-    );
-    const u = new URL(location.href);
-    return {
-      path: decodeURIComponent(u.pathname).slice(0, 160),
-      search: u.search.slice(0, 80),
-      histLen: history.length,
-      isDir: u.pathname.includes("/dir/"),
-      dirBox: !!(dirBox && dirBox.offsetParent !== null),
-      filledInputs: inputs.length,
-    };
-  }
-
-  async function runRouteDiag() {
-    if (railBusy) return;
-    const t0 = Date.now();
-    const lines = [];
-    const log = (stage) => lines.push({ stage, ms: Date.now() - t0, ...routeSnapshot() });
-    const startHref = location.href;
-    await toggleTarget(log);
-    await sleep(800);
-    log("收起後 0.8 秒");
-    const changed = location.href !== startHref;
-    if (changed) {
-      history.back();
-      await sleep(1500);
-      log("history.back() 後 1.5 秒");
-    } else {
-      lines.push({ stage: "網址沒變，未試 history.back()" });
-    }
-    showDiag(
-      "gmaps-parking v" + (GM_info && GM_info.script ? GM_info.script.version : "?") + " 路線診斷\n" +
-      "網址是否改變：" + (changed ? "是" : "否") + "\n" +
-      lines.map((l) => JSON.stringify(l)).join("\n")
-    );
-  }
-
-  function showDiag(text, title) {
-    document.getElementById("gmp-diag")?.remove();
-    const box = document.createElement("div");
-    box.id = "gmp-diag";
-    box.style.cssText =
-      "position:fixed;z-index:10001;left:50%;top:50%;transform:translate(-50%,-50%);width:min(640px,92vw);" +
-      "background:#fff;color:#202124;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.35);padding:16px;" +
-      "font:14px Roboto,'Microsoft JhengHei',sans-serif;";
-    box.innerHTML =
-      '<div style="font-weight:500;margin-bottom:8px">' + (title || "路線診斷結果（按「複製」後貼給 Claude）") + '</div>' +
-      '<div style="font-size:12px;color:#5f6368;margin-bottom:8px">可能含地點名稱，不想給可以先刪掉</div>' +
-      '<textarea readonly style="width:100%;height:260px;font:12px monospace;box-sizing:border-box"></textarea>' +
-      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">' +
-      '<button type="button" data-a="copy">複製</button><button type="button" data-a="close">關閉</button></div>';
-    box.querySelector("textarea").value = text;
-    box.addEventListener("click", (e) => {
-      const a = e.target && e.target.dataset && e.target.dataset.a;
-      if (a === "copy") {
-        const ta = box.querySelector("textarea");
-        ta.select();
-        try {
-          navigator.clipboard.writeText(ta.value);
-        } catch (err) {
-          document.execCommand("copy");
-        }
-        e.target.textContent = "已複製";
-      } else if (a === "close") box.remove();
-    });
-    document.body.appendChild(box);
-  }
-
-  GM_registerMenuCommand("🩺 路線診斷（在路線頁執行）", runRouteDiag);
-
-  // ───────── 標籤診斷：地圖上的「想去的地點」旗子是不是網頁元素？ ─────────
-  // 切換兩次（關→開 或 開→關），比對前後每一類元素的數量。
-  // 跟著消失又出現的那一類就是旗子 → 可以直接用 CSS 藏起來，不用開面板。
-  // 都沒變（只有 canvas）→ 旗子是畫在地圖圖層裡的，只能走「已儲存」面板。
-  function elementCensus() {
-    const counts = new Map();
-    const samples = new Map();
-    for (const el of document.body.querySelectorAll("*")) {
-      if (el.closest("#gmp-diag, #" + RAIL_ID + ", #" + TOAST_ID)) continue;
-      const r = el.getBoundingClientRect();
-      if (!r.width || !r.height) continue; // 只算看得到的
-      let key = el.tagName.toLowerCase();
-      const cls = (typeof el.className === "string" ? el.className : "").trim().split(/\s+/).slice(0, 2).join(".");
-      if (cls) key += "." + cls;
-      const role = el.getAttribute("role");
-      if (role) key += "[role=" + role + "]";
-      if (el.tagName === "IMG") {
-        const src = (el.getAttribute("src") || "").replace(/^https?:\/\/[^/]+/, "").split(/[?=&]/)[0].slice(0, 50);
-        key += "[src=" + src + "]";
-      }
-      counts.set(key, (counts.get(key) || 0) + 1);
-      if (!samples.has(key)) {
-        const label = el.getAttribute("aria-label") || el.getAttribute("title") || "";
-        samples.set(key, label.slice(0, 30));
-      }
-    }
-    return { counts, samples, canvas: document.querySelectorAll("canvas").length };
-  }
-
-  async function runMarkerDiag() {
-    if (railBusy) return;
-    const name = targetName();
-    const before = listState[name];
-    await sleep(300);
-    const c0 = elementCensus();
-    await toggleTarget();
-    await sleep(2500); // 等地圖重畫
-    const c1 = elementCensus();
-    const mid = listState[name];
-    await toggleTarget();
-    await sleep(2500);
-    const c2 = elementCensus();
-    const after = listState[name];
-    const keys = new Set([...c0.counts.keys(), ...c1.counts.keys(), ...c2.counts.keys()]);
-    const rows = [];
-    for (const k of keys) {
-      const a = c0.counts.get(k) || 0, b = c1.counts.get(k) || 0, c = c2.counts.get(k) || 0;
-      if (a === b && b === c) continue;
-      rows.push({ k, a, b, c, flip: Math.abs(a - b) >= 3 && Math.abs(c - a) <= Math.max(2, a * 0.2) });
-    }
-    rows.sort((x, y) => (y.flip - x.flip) || Math.abs(y.a - y.b) - Math.abs(x.a - x.b));
-    const fmt = (v) => (v === true ? "顯示" : v === false ? "隱藏" : "?");
-    const out = [
-      "gmaps-parking v" + (GM_info && GM_info.script ? GM_info.script.version : "?") + " 標籤診斷",
-      `「${name}」狀態：${fmt(before)} → ${fmt(mid)} → ${fmt(after)}`,
-      `canvas 數量：${c0.canvas} / ${c1.canvas} / ${c2.canvas}`,
-      `數量有變的元素類別（第一次 / 切換後 / 切回後），★ = 跟著消失又出現：`,
-      ...rows.slice(0, 30).map(
-        (r) => `${r.flip ? "★" : " "} ${r.a} / ${r.b} / ${r.c}  ${r.k}` +
-          ((c0.samples.get(r.k) || c1.samples.get(r.k)) ? `  「${c0.samples.get(r.k) || c1.samples.get(r.k)}」` : "")
-      ),
-      rows.length ? "" : "（沒有任何元素數量改變）",
-    ];
-    showDiag(out.join("\n"), "標籤診斷結果（按「複製」後貼給 Claude）");
-  }
-
-  GM_registerMenuCommand("🩺 標籤診斷（看得到旗子時執行）", runMarkerDiag);
 
 
   function toast(text) {
