@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.11
+// @version      2.12
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角開關一鍵切換「想去的地點」顯示
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -482,6 +482,7 @@
     let openedByUs = false;
     let hidden = null;
     let msg = "";
+    const startHref = location.href;
     try {
       ensureListToggles(true);
       let row = targetRow();
@@ -518,8 +519,18 @@
     } finally {
       if (openedByUs) {
         await sleep(100);
-        closeSavedPanel();
-        await sleep(250);
+        // 診斷確認（v2.11）：開「已儲存」會把網址換成已儲存頁並新增一筆歷史，
+        // 再點一次「已儲存」只收面板、網址不回來，原本的路線就沒了。
+        // 改用「回上一頁」收面板：路線、地點頁、搜尋結果都會原樣回來，不用重新載入。
+        if (location.href !== startHref) {
+          const savedHref = location.href;
+          history.back();
+          await waitFor(() => location.href !== savedHref, 2000);
+          await sleep(200);
+        } else {
+          closeSavedPanel();
+          await sleep(250);
+        }
         trace("收起已儲存");
       }
       if (hidden) hidden.style.removeProperty("opacity");
