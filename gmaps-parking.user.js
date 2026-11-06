@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Maps 附近停車場
 // @namespace    https://github.com/charles0506/gmaps-parking
-// @version      2.10
+// @version      2.11
 // @description  在 Google Maps 最上排加「🅿️ 停車場」分類鈕，一鍵搜尋目前視角附近的停車場；載入時預設開啟路況圖層；裸開 /maps 時定位在自訂住家（未設定則台灣全島）；「已儲存」清單每列加顯示/隱藏開關；左下角開關一鍵切換「想去的地點」顯示
 // @homepageURL  https://github.com/charles0506/gmaps-parking
 // @supportURL   https://github.com/charles0506/gmaps-parking/issues
@@ -472,8 +472,9 @@
   }
 
   let railBusy = false;
-  async function toggleTarget() {
+  async function toggleTarget(trace = () => {}) {
     if (railBusy) return;
+    trace("開始");
     railBusy = true;
     paintRail(true);
     const html = document.documentElement;
@@ -491,7 +492,9 @@
           if (!saved) throw new Error("找不到左側欄的「已儲存」");
           saved.click();
           openedByUs = true;
+          trace("點了已儲存");
           tab = await waitFor(findListsTab, 4000);
+          trace("已儲存面板出現");
           if (!tab) throw new Error("打不開「已儲存 → 清單」");
         }
         if (openedByUs) {
@@ -500,10 +503,12 @@
         }
         if (tab.getAttribute("aria-selected") !== "true") tab.click();
         row = await waitFor(() => (ensureListToggles(true), targetRow()), 4000);
+        trace("清單分頁出現");
         if (!row) throw new Error(`「已儲存」裡找不到「${TARGET_NAMES[0]}」`);
       }
       // 以選單上的實際狀態為準反轉（不靠記錄，避免記錯）
       const v = await operate(row, "toggle");
+      trace("切換完成");
       if (v == null) throw new Error("找不到「顯示在你的地圖上」選項");
       listState[row.name] = v;
       paint(row.btn, v);
@@ -515,6 +520,7 @@
         await sleep(100);
         closeSavedPanel();
         await sleep(250);
+        trace("收起已儲存");
       }
       if (hidden) hidden.style.removeProperty("opacity");
       html.classList.remove(AUTO_CLS, PROBING_CLS);
@@ -523,6 +529,84 @@
       toast(msg);
     }
   }
+
+
+  // ───────── 路線診斷：看開關「已儲存」面板時，網址與路線怎麼變 ─────────
+  // 會真的切換一次「想去的地點」，再試 history.back() 能不能把路線找回來，結果顯示在視窗裡讓使用者複製。
+  function routeSnapshot() {
+    const inputs = [...document.querySelectorAll("input")].filter(
+      (el) => el.offsetParent !== null && el.value
+    );
+    const dirBox = document.querySelector(
+      "#directions-searchbox-0, #directions-searchbox-1, [aria-label*='起點'], [aria-label*='Starting point'], [aria-label*='目的地'], [aria-label*='destination']"
+    );
+    const u = new URL(location.href);
+    return {
+      path: decodeURIComponent(u.pathname).slice(0, 160),
+      search: u.search.slice(0, 80),
+      histLen: history.length,
+      isDir: u.pathname.includes("/dir/"),
+      dirBox: !!(dirBox && dirBox.offsetParent !== null),
+      filledInputs: inputs.length,
+    };
+  }
+
+  async function runRouteDiag() {
+    if (railBusy) return;
+    const t0 = Date.now();
+    const lines = [];
+    const log = (stage) => lines.push({ stage, ms: Date.now() - t0, ...routeSnapshot() });
+    const startHref = location.href;
+    await toggleTarget(log);
+    await sleep(800);
+    log("收起後 0.8 秒");
+    const changed = location.href !== startHref;
+    if (changed) {
+      history.back();
+      await sleep(1500);
+      log("history.back() 後 1.5 秒");
+    } else {
+      lines.push({ stage: "網址沒變，未試 history.back()" });
+    }
+    showDiag(
+      "gmaps-parking v" + (GM_info && GM_info.script ? GM_info.script.version : "?") + " 路線診斷\n" +
+      "網址是否改變：" + (changed ? "是" : "否") + "\n" +
+      lines.map((l) => JSON.stringify(l)).join("\n")
+    );
+  }
+
+  function showDiag(text) {
+    document.getElementById("gmp-diag")?.remove();
+    const box = document.createElement("div");
+    box.id = "gmp-diag";
+    box.style.cssText =
+      "position:fixed;z-index:10001;left:50%;top:50%;transform:translate(-50%,-50%);width:min(640px,92vw);" +
+      "background:#fff;color:#202124;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.35);padding:16px;" +
+      "font:14px Roboto,'Microsoft JhengHei',sans-serif;";
+    box.innerHTML =
+      '<div style="font-weight:500;margin-bottom:8px">路線診斷結果（按「複製」後貼給 Claude）</div>' +
+      '<div style="font-size:12px;color:#5f6368;margin-bottom:8px">內含路線的地點名稱，不想給可以先刪掉 path 裡的地名</div>' +
+      '<textarea readonly style="width:100%;height:260px;font:12px monospace;box-sizing:border-box"></textarea>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">' +
+      '<button type="button" data-a="copy">複製</button><button type="button" data-a="close">關閉</button></div>';
+    box.querySelector("textarea").value = text;
+    box.addEventListener("click", (e) => {
+      const a = e.target && e.target.dataset && e.target.dataset.a;
+      if (a === "copy") {
+        const ta = box.querySelector("textarea");
+        ta.select();
+        try {
+          navigator.clipboard.writeText(ta.value);
+        } catch (err) {
+          document.execCommand("copy");
+        }
+        e.target.textContent = "已複製";
+      } else if (a === "close") box.remove();
+    });
+    document.body.appendChild(box);
+  }
+
+  GM_registerMenuCommand("🩺 路線診斷（在路線頁執行）", runRouteDiag);
 
   function toast(text) {
     if (!text) return;
